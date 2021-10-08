@@ -2,7 +2,7 @@ module github.com/zchee/go-copystd
 
 go 1.17
 
-require golang.org/x/tools v0.1.6-0.20210820212750-d4cc65f0b2ff
+require golang.org/x/tools v0.1.8-0.20211007211504-c5188f24a678
 
 require (
 	golang.org/x/mod v0.4.2 // indirect
