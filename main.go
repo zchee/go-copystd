@@ -66,7 +66,7 @@ func run() error {
 	for _, pkg := range flagPackages {
 		listPkgs, err := listPackages(ctx, flagSrc, pkg)
 		if err != nil {
-			return fmt.Errorf("listPackages: %w", err)
+			return fmt.Errorf("list packages: %w", err)
 		}
 
 		var packages []*Package
@@ -81,12 +81,13 @@ func run() error {
 			packages = append(packages, listPkg)
 			for _, imp := range listPkg.Imports {
 				switch {
-				case strings.HasPrefix(imp, "cmd"), strings.HasPrefix(imp, "internal"):
+				case strings.Contains(imp, "cmd"), strings.Contains(imp, "internal"):
 					subPkgs, err := listPackages(ctx, flagSrc, imp)
 					if err != nil {
-						return err
+						return fmt.Errorf("list packages: %w", err)
 					}
 					packages = append(packages, subPkgs...)
+
 				default:
 					fmt.Printf("ignore: %s\n", imp)
 				}
@@ -94,19 +95,14 @@ func run() error {
 		}
 
 		for _, p := range packages {
-			dir := filepath.Join(flagDist, strings.TrimPrefix(p.Dir, gorootSrc))
-			if _, err := os.Stat(dir); err != nil && !os.IsNotExist(err) {
-				continue
-			}
-
 			subPkgs, err := listPackages(ctx, flagSrc, p.Dir)
 			if err != nil {
-				return err
+				return fmt.Errorf("list packages: %w", err)
 			}
 
 			for _, subPkg := range subPkgs {
 				if err := copyInternal(subPkg); err != nil {
-					return err
+					return fmt.Errorf("copy internal: %w", err)
 				}
 			}
 		}
@@ -134,7 +130,7 @@ func listPackages(ctx context.Context, src string, args ...string) (pkgs []*Pack
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create StdoutPipe: %w", err)
 	}
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -147,104 +143,102 @@ func listPackages(ctx context.Context, src string, args ...string) (pkgs []*Pack
 	}()
 
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("start cmd: %w", err)
 	}
+
 	dec := json.NewDecoder(stdout)
 	for dec.More() {
 		var pkg Package
 		if err := dec.Decode(&pkg); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("decode json: %w", err)
 		}
 		pkgs = append(pkgs, &pkg)
 	}
+
 	if err := cmd.Wait(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("wait cmd: %w", err)
 	}
 
 	return pkgs, nil
 }
 
 func copyInternal(pkg *Package) error {
-	for _, path := range sourceFiles(pkg) {
-		// zbootstrap.go is created by bootstrap
-		if path == "zbootstrap.go" {
+	files := sourceFiles(pkg)
+	for _, file := range files {
+		if file == "zbootstrap.go" { // zbootstrap.go is created by bootstrap
 			continue
 		}
 
-		body := readFile(path)
-		name := filepath.Base(path)
+		dir, filename := filepath.Split(file)
+		dir = strings.TrimPrefix(dir, gorootSrc)
+		dir = strings.ReplaceAll(dir, "cmd", "")
+		dir = strings.ReplaceAll(dir, "internal", "")
 
-		for imppath, fixpath := range map[string]string{
-			filepath.Join(gorootSrc, "cmd", "asm", "internal"):     filepath.Join(gorootSrc, "asm"),
-			filepath.Join(gorootSrc, "cmd", "compile", "internal"): filepath.Join(gorootSrc, "compile"),
-			filepath.Join(gorootSrc, "cmd", "go", "internal"):      filepath.Join(gorootSrc, "go"),
-			filepath.Join(gorootSrc, "cmd", "link", "internal"):    filepath.Join(gorootSrc, "link"),
-			filepath.Join(gorootSrc, "cmd", "internal"):            filepath.Join(gorootSrc),
-			filepath.Join(gorootSrc, "internal"):                   filepath.Join(gorootSrc),
-		} {
-			if strings.HasPrefix(pkg.Dir, imppath) {
-				dstpath := strings.ReplaceAll(pkg.Dir, imppath, fixpath)
+		dstPath := filepath.Join(flagDist, dir)
+		fmt.Printf("dstPath: %s\n", dstPath)
 
-				if err := writeFile(strings.TrimPrefix(dstpath, gorootSrc), name, body); err != nil {
-					return err
-				}
-			}
+		data, err := readFile(file)
+		if err != nil {
+			return err
+		}
+
+		if err := writeFile(dstPath, filename, data); err != nil {
+			return fmt.Errorf("write file: %w", err)
 		}
 	}
 
 	return nil
 }
 
-func sourceFiles(pkg *Package) (paths []string) {
-	var files []string
-	for _, list := range [...][]string{
+func sourceFiles(pkg *Package) (files []string) {
+	fileLists := [...][]string{
 		pkg.GoFiles,
 		pkg.TestGoFiles,
 		pkg.XTestGoFiles,
 		pkg.IgnoredGoFiles,
-	} {
-		for _, name := range list {
-			files = append(files, filepath.Join(pkg.Dir, name))
+	}
+
+	for _, fileList := range fileLists {
+		for _, file := range fileList {
+			files = append(files, filepath.Join(pkg.Dir, file))
 		}
 	}
 
 	return files
 }
 
-func readFile(path string) string {
-	body, err := os.ReadFile(path)
+func readFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		panic(err)
+		return "", fmt.Errorf("read %s file: %w", path, err)
 	}
 
-	sep := string(os.PathSeparator)
-	str := string(body)
-	str = strings.ReplaceAll(str, "cmd/asm/internal"+sep, filepath.Join(flagModule, "asm"+sep))
-	str = strings.ReplaceAll(str, "cmd/compile/internal"+sep, filepath.Join(flagModule, "compile"+sep))
-	str = strings.ReplaceAll(str, "cmd/go/internal"+sep, filepath.Join(flagModule, "go"+sep))
-	str = strings.ReplaceAll(str, "cmd/link/internal"+sep, filepath.Join(flagModule, "link"+sep))
-	str = strings.ReplaceAll(str, "cmd/internal"+sep, flagModule+sep)
-	str = strings.ReplaceAll(str, "internal"+sep, flagModule+sep)
+	body := string(data)
+	body = strings.ReplaceAll(body, `"cmd`, `"`+flagModule)
+	body = strings.ReplaceAll(body, `"internal`, `"`+flagModule)
+	body = strings.ReplaceAll(body, `/internal`, ``)
 
-	return str
+	return body, nil
 }
 
 func writeFile(dir, name, body string) error {
-	if err := os.MkdirAll(filepath.Join(flagDist, dir), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 
+	imports.LocalPrefix = flagModule
 	data, err := imports.Process(name, []byte(body), &imports.Options{
 		TabWidth:  8,
 		TabIndent: true,
 		Comments:  true,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("process goimports: %w", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(flagDist, dir, name), data, 0o600); err != nil {
-		return err
+	filename := filepath.Join(dir, name)
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		return fmt.Errorf("write %s file: %w", filename, err)
 	}
 
 	return nil
